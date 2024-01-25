@@ -1,37 +1,66 @@
 /*======================================================================================
 ESP32-Camera Optical Flow Sensor
 
-Uses 3 frame buffers: one buffer grabs latest camera image while at the same time two previous buffers are used for flow calculation
+Uses 3 frame buffers: one buffer grabs latest camera image while at the same time two 
+previous buffers are used for flow calculation
 
-This program uses a slightly modified Adaptive Rood Pattern Search for Block Matching. See https://en.wikipedia.org/wiki/Block-matching_algorithm
+This program uses a slightly modified Adaptive Rood Pattern Search for Block Matching. 
+See https://en.wikipedia.org/wiki/Block-matching_algorithm
 
-Usage:
+ESP32 single core at 240MHz does 12M block matching pixel operation per second, 
+approx. 3.5ms for 240x176
+========================================================================================
+MIT License
 
-bool ReadOpticalFlow(int8_t* dx, int8_t* dy){
-  uint8_t ADDRESS = 0x55;
-  Wire.beginTransmission(ADDRESS);
-  Wire.write(0x00);
-  Wire.endTransmission(false);
-  Wire.requestFrom(ADDRESS, 3);
-  *dx = Wire.read();
-  *dy = Wire.read();
-  uint8_t cnt = Wire.read();
-  return (cnt>0);
-}
+Copyright (c) 2024 qqqlab https://github.com/qqqlab
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ======================================================================================*/
 
-//=================================================================================
+
+//======================================================================================
 // CONFIG
-//=================================================================================
+//======================================================================================
 
-#define I2C_SDA_PIN 4
-#define I2C_SCL_PIN 13
-#define I2C_ADDR 0x55
+// Config for OV3660 M5Stack Timer Camera X (in Arduino IDE select board: M5Stack-Timer-CAM)
 
+#define LED_PIN 2
+//#define BUTTON_PIN 37 //not used
+
+//----------------------
+// I2C interface config
+//----------------------
+#define OF_I2C_SDA_PIN 4
+#define OF_I2C_SCL_PIN 13
+#define OF_I2C_ADDR 0x55
+
+//----------------------
+// Block matching config
+//----------------------
+#define BM_RESOLUTION_DPP 0.22 //Resolution in degrees/pixel (dpp) - Measured: 0.22 ddp, Specs: FOV 66.5 deg diagonal, QXGA:2048x1535 -> 2560 pix dia -> 0.026 dpp; HQVGA 240x176 ~= 1/8 QXGA -> 0.21 dpp
+#define BM_FRAMERATE_S 0.040 //Frame rate in seconds - 40ms / 25 fps
 #define BM_PMAX 15 //maximum block match search distance
 #define BM_BSTEP 2 //step size through block
 
-//config for OV3660 M5Stack Timer Camera X - measured: 0.22 degrees / pixel (FOV 66.5 deg, QXGA:2048x1535 = 2560 diagonal -> 0.026 deg/pix; HQVGA 240x176 ~= 1/8 QXGA -> 0.21 deg/pix)
+//----------------------
+// Camera config
+//----------------------
 //#define XCLK_FREQ_HZ 27000000 //OV3660 datasheet: allowed input freq 6-27MHz, XCLK=27Mhz HQVGA dt=33ms 30fps but with dropped frames "E (6328) cam_hal: FB-SIZE: 38400 != 42240"
 #define XCLK_FREQ_HZ 22500000 //OV3660 datasheet: allowed input freq 6-27MHz, XCLK=22.5Mhz HQVGA dt=40ms 25fps works fine
 
@@ -253,7 +282,7 @@ void process_image(int w, int h, pixformat_t format, uint8_t *buf, int len, uint
 }
 
 void process_ARPS(int w, int h, uint8_t *buf, uint8_t *buf_last) {
-  Serial.printf("[ARPS] ");
+  //Serial.printf("[ARPS] ");
   static int8_t dx = 0;
   static int8_t dy = 0;
   int p = BM_PMAX;
@@ -342,9 +371,19 @@ void setup() {
   Serial.begin(115200);
   Serial.printf("Optical Flow\n");
 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   i2c_setup();
 
-  while(camera_init() != ESP_OK) delay(1000);;
+  while(camera_init() != ESP_OK) {
+    delay(100);
+    digitalWrite(LED_PIN, LOW);
+    delay(100); 
+    digitalWrite(LED_PIN, HIGH);
+  }
+
+  digitalWrite(LED_PIN, HIGH);
 }
 
 void loop() {
@@ -380,9 +419,9 @@ void bm_ES(uint16_t w, uint8_t* buf1, uint8_t* buf2, uint16_t bx, uint16_t by, u
 }
 
 
-
 bool bm_done[2*(BM_PMAX)+1][2*(BM_PMAX)+1];
 
+//helper macro to check dx,dy: marks point as done in bm_done, and updates minimum
 #define BM_CHECK(dx, dy) \
 if(-p<=dx && dx<=p && -p<=dy && dy<=p && !bm_done[p+dx][p+dy]) { \
   bm_done[p+dx][p+dy] = true; \
@@ -514,13 +553,16 @@ uint32_t bm_MAV(uint16_t w, uint8_t* buf1, uint16_t bx, uint16_t by, uint8_t bw,
 #include <Wire.h>
 
 enum i2c_reg_e {
-  REG_DX = 0,
-  REG_DY = 1,
-  REG_CNT = 2,
+  REG_DX = 0,  //x-flow in pixels, reading DX copies DX,DY,CNT to shadow registers
+  REG_DY = 1,  //y-flow in pixels
+  REG_CNT = 2, //number of samples, reading CNT resets DX,DY,CNT
 
-  REG_WAI1 = 0x80, //who am i 1 -> 'o'
-  REG_WAI2 = 0x81, //who am i 2 -> 'f'
-  REG_RESET = 0x82, //bit0: reset dx,dy,cnt
+  REG_WAI1 = 0x80, //who am i -> 0x6F 'o' 
+  REG_WAI2 = 0x81, //who am i -> 0x66 'f' 
+  REG_RES_H = 0x82, //resolution in degrees per pixel / 65536
+  REG_RES_L = 0x83,
+  REG_RATE_H = 0x84, //frame rate in seconds / 65536
+  REG_RATE_L = 0x85,
 };
 
 uint8_t i2c_reg = 0;
@@ -546,13 +588,6 @@ void i2c_RxHandler(int numBytes)
       i2c_reg = b;
     }else{
       switch( (i2c_reg_e)i2c_reg ) {
-        case REG_RESET:
-          if(b & 0x01) {
-            of_dx = 0;
-            of_dy = 0;
-            of_cnt = 0;
-          }
-          break;
         default:
           break;
       } 
@@ -563,27 +598,21 @@ void i2c_RxHandler(int numBytes)
 
 void i2c_TxHandler(void)
 {
-  //temporary values
+  //shadow register values
   static int dx = 0;
   static int dy = 0;
   static int cnt = 0;
-  switch( (i2c_reg_e)i2c_reg ) {
-    case REG_WAI1:
-      Wire.write('o');
-      break;
-    case REG_WAI2:
-      Wire.write('f');
-      break;       
+  switch( (i2c_reg_e)i2c_reg ) {      
     case REG_DX:
-      //load temporary values
+      //load shadow values
       dx = of_dx;
       dy = of_dy;
       cnt = of_cnt;
       Wire.write(int8_saturate(dx));
-      break;
+      //fall thru
     case REG_DY:
       Wire.write(int8_saturate(dy));
-      break;
+      //fall thru
     case REG_CNT:
       Wire.write(uint8_saturate(cnt));
       //update optical flow
@@ -591,14 +620,32 @@ void i2c_TxHandler(void)
       of_dy -= dy;
       of_cnt -= cnt;
       break;
+    case REG_WAI1:
+      Wire.write('o');
+      //fall thru
+    case REG_WAI2:
+      Wire.write('f');
+      //fall thru
+    case REG_RES_H:
+      Wire.write( (uint8_t) ((uint32_t)((BM_RESOLUTION_DPP)*65536+0.5) >> 8) );
+      //fall thru
+    case REG_RES_L:
+      Wire.write( (uint8_t) ((uint32_t)((BM_RESOLUTION_DPP)*65536+0.5) & 0xff) );
+      //fall thru
+    case REG_RATE_H:
+      Wire.write( (uint8_t) ((uint32_t)((BM_FRAMERATE_S)*65536+0.5) >> 8) );
+      //fall thru
+    case REG_RATE_L:
+      Wire.write( (uint8_t) ((uint32_t)((BM_FRAMERATE_S)*65536+0.5) & 0xff) );
+      break;     
     default:
       break;       
   }
-  i2c_reg++;
+  //i2c_reg++; //don't increment reg as we don't know how many bytes were written to master
 }
 
 void i2c_setup() {
-  Wire.begin(I2C_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, 1000000);
+  Wire.begin(OF_I2C_ADDR, OF_I2C_SDA_PIN, OF_I2C_SCL_PIN, 1000000);
   Wire.onRequest(i2c_TxHandler);
   Wire.onReceive(i2c_RxHandler);
 }
