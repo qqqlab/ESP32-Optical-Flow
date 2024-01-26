@@ -205,14 +205,25 @@ esp_err_t camera_init(){
         digitalWrite(CAM_PIN_PWDN, LOW);
     }
 
-    //initialize the camera
+    //report memory
+    Serial.printf("BEFORE esp_camera_init(): HeapSize:%d FreeHeap:%d MaxAlloc:%d\n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    heap_caps_print_heap_info(MALLOC_CAP_INTERNAL|MALLOC_CAP_DEFAULT);
+
+    //initialize the camera, hang on failure
     uint32_t free0 = ESP.getFreeHeap();  //esp_get_free_heap_size();
-    esp_err_t err = esp_camera_init(&camera_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Camera Init Failed");
-        return err;
+    while( ESP_OK != esp_camera_init(&camera_config)) {
+      Serial.printf("ERROR  esp_camera_init(): HeapSize:%d FreeHeap:%d MaxAlloc:%d\n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      heap_caps_print_heap_info(MALLOC_CAP_INTERNAL|MALLOC_CAP_DEFAULT);
+      delay(100);
+      digitalWrite(LED_PIN, LOW);
+      delay(100); 
+      digitalWrite(LED_PIN, HIGH);
     }
-    Serial.printf("esp_camera_init allocated %d bytes (%d per fb), free=%d\n", free0-ESP.getFreeHeap(), (free0-ESP.getFreeHeap()) / camera_config.fb_count, ESP.getFreeHeap());
+    Serial.printf("esp_camera_init allocated %d bytes, free=%d\n", free0-ESP.getFreeHeap(), ESP.getFreeHeap());
+
+    //report memory
+    Serial.printf("AFTER  esp_camera_init(): HeapSize:%d FreeHeap:%d MaxAlloc:%d\n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    heap_caps_print_heap_info(MALLOC_CAP_INTERNAL|MALLOC_CAP_DEFAULT);
 
     //get initial frame buffer
     fb_last = esp_camera_fb_get();
@@ -348,7 +359,6 @@ void process_9Blocks(int w, int h, uint8_t *buf, uint8_t *buf_last) {
   int bw = (w - 2*p)/3;
   int bh = (h - 2*p)/3;
 
-
   for(uint16_t j=0;j<3;j++) {
     Serial.println();
     for(uint16_t i=0;i<3;i++) {
@@ -359,7 +369,6 @@ void process_9Blocks(int w, int h, uint8_t *buf, uint8_t *buf_last) {
       dysum += dy;
       Serial.printf("%+d,%+d,%d\t", dx, dy, bm_MAV(w, buf, bx, by, bw, bh, bstep));
     }
-    
   }
   dxsum /= 9;
   dysum /= 9;   
@@ -368,22 +377,17 @@ void process_9Blocks(int w, int h, uint8_t *buf, uint8_t *buf_last) {
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.printf("Optical Flow\n");
-
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  digitalWrite(LED_PIN, LOW);  //led off during setup
+  
+  Serial.begin(115200);
+  Serial.printf("ESP32-Optical-Flow\n");
+
+  camera_init(); //function does not return on fail
 
   i2c_setup();
 
-  while(camera_init() != ESP_OK) {
-    delay(100);
-    digitalWrite(LED_PIN, LOW);
-    delay(100); 
-    digitalWrite(LED_PIN, HIGH);
-  }
-
-  digitalWrite(LED_PIN, HIGH);
+  digitalWrite(LED_PIN, HIGH); //led on for normal run
 }
 
 void loop() {
